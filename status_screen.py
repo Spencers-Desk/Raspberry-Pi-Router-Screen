@@ -10,16 +10,14 @@ Pages:
   4) Tailscale IPv4 (if installed)
   5) Throughput (kbit/s) for eth0 and wlan0
   6) CPU temp, load, memory used
-  7) nftables NAT POSTROUTING counters (if accessible)
 
 Requirements:
-  sudo apt install python3-pil python3-smbus i2c-tools jq
+  sudo apt install python3-pil python3-smbus i2c-tools
   pip3 install luma.oled
 """
 
 import os
 import time
-import json
 import socket
 import subprocess
 from datetime import datetime, timedelta
@@ -243,30 +241,6 @@ def get_mem_used_mb():
         return None
 
 
-def get_nft_nat_counters():
-    """
-    Requires: nft JSON output and a counter on your masquerade rule.
-    Example rule:
-      sudo nft add rule ip nat POSTROUTING oifname "wlan0" counter masquerade
-    Returns dict like {"packets": int, "bytes": int} or None.
-    """
-    out, rc = run("/usr/sbin/nft -j list chain ip nat POSTROUTING", timeout=1.5)
-    if rc != 0 or not out:
-        return None
-    try:
-        j = json.loads(out)
-        # Find first rule with "counter"
-        for rule in j.get("nftables", []):
-            if "rule" in rule:
-                expr = rule["rule"].get("expr", [])
-                for e in expr:
-                    if "counter" in e:
-                        return e["counter"]
-        return None
-    except Exception:
-        return None
-
-
 # -----------------------------
 # Display helpers
 # -----------------------------
@@ -359,7 +333,7 @@ def draw_wifi_page(device, wan_ip, ssid, rssi, ok):
 def main():
     device = make_device()
     tput = Throughput()
-    pages = ["host", "wan", "lan", "ts", "tput", "sys", "nft"]
+    pages = ["host", "wan", "lan", "ts", "tput", "sys"]
     page_idx = 0
     page_sw_every = 5.0   # seconds per page
     last_switch = 0.0
@@ -428,22 +402,6 @@ def main():
                     f"mem   {mem} MB used" if mem is not None else "mem   ?",
                     "",
                 ]
-                draw_lines(device, lines)
-
-            elif page == "nft":
-                c = get_nft_nat_counters()
-                if c:
-                    pk = c.get("packets", 0)
-                    by = c.get("bytes", 0)
-                    lines = [
-                        "NAT counters",
-                        f"pkts  {pk}",
-                        f"bytes {by}",
-                        "",
-                        "",
-                    ]
-                else:
-                    lines = ["NAT counters", "unavailable", "", "", ""]
                 draw_lines(device, lines)
 
         except Exception:
