@@ -428,6 +428,16 @@ def draw_lines(device, lines, small=False):
     device.display(image)
 
 
+# Add missing blank_screen (used when MODE_OFF)
+def blank_screen(device):
+    """Blank (turn off) the OLED contents."""
+    try:
+        img = Image.new("1", (device.width, device.height), 0)
+        device.display(img)
+    except Exception as e:
+        debug(f"blank_screen error: {e}")
+
+
 def bar(draw, x, y, w, h, frac):
     """
     Simple horizontal bar for visual throughput or RSSI.
