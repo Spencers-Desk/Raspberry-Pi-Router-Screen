@@ -1,8 +1,6 @@
 # Raspberry Pi Router Screen
 
-A small 128x64 SH1106 OLED dashboard for a Raspberry Pi used as a router/firewall. It cycles through network and system stats to make a headless setup easier to monitor.
-
-Note: The nftables NAT screen and related functions were removed.
+This is a simple script that writes system info to a small 128x64 SH1106 OLED dashboard for a Raspberry Pi router. It has a system info, screen saver, and poweroff mode.
 
 ## What it shows
 1) Hostname, time, uptime  
@@ -13,15 +11,9 @@ Note: The nftables NAT screen and related functions were removed.
 6) CPU temperature, load, memory used
 
 ## Hardware
-- Raspberry Pi with I2C enabled
+- Raspberry Pi
 - 128x64 SH1106 OLED (I2C, default address 0x3C)
-- Optional: momentary push button to toggle a screensaver
-  - Wire one side to BCM 17, the other to GND (internal pull-up is enabled)
-
-## Software requirements
-```bash
-sudo apt install -y python3-pil python3-smbus python3-rpi.gpio python3-luma.oled
-```
+- Optional: momentary push button to toggle between info, screensaver, and blank screen
 
 ## Wire the Screen and Button
 OLED SH1106 I2C:
@@ -68,14 +60,15 @@ python3 status_screen.py
 - Press the button on BCM 17 to toggle the bouncing Raspberry screensaver on/off.
 
 6) Optional: run on boot via systemd (adjust paths as needed):
-Add your user to needed groups (for non-root access) and reboot:
+
+Create the systemd service file:
 ```bash
-sudo usermod -aG i2c,gpio $USER
-sudo reboot
+sudo nano /etc/systemd/system/pi-router-oled.service
 ```
 
-```bash
-sudo tee /etc/systemd/system/pi-router-oled.service >/dev/null <<'UNIT'
+Paste the following content into the editor:
+Make sure you replace all of the "pi"s in the file with the username your pi uses (if you aren't using the default pi)
+```ini
 [Unit]
 Description=Pi Router OLED Status Screen
 After=network-online.target
@@ -85,17 +78,20 @@ ExecStart=/usr/bin/python3 /home/pi/Raspberry-Pi-Router-Screen/status_screen.py
 WorkingDirectory=/home/pi/Raspberry-Pi-Router-Screen
 User=pi
 Restart=on-failure
+ExecStop=/usr/bin/python3 /home/pi/Raspberry-Pi-Router-Screen/poweroff_display.py
 
 [Install]
 WantedBy=multi-user.target
-UNIT
+```
 
+Save and exit (Ctrl+O, Enter, Ctrl+X), then enable and start it:
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now pi-router-oled.service
 systemctl status pi-router-oled.service --no-pager
 ```
 
-Verify logs if needed:
+If the service is failing, check the logs using:
 ```bash
 journalctl -u pi-router-oled.service -e
 ```
@@ -115,28 +111,6 @@ Behavior:
 - Button cycles modes: Pages -> Screensaver (bouncing Raspberry) -> Off (display blank) -> Pages ...
 - In Off mode the display is blanked but the button still works to wake it (next press returns to Pages).
 
-## Services (optional)
-Create a simple systemd service to start on boot:
-```ini
-[Unit]
-Description=Pi Router OLED Status Screen
-After=network-online.target
-
-[Service]
-ExecStart=/usr/bin/python3 /path/to/Raspberry-Pi-Router-Screen/status_screen.py
-Restart=on-failure
-User=pi
-WorkingDirectory=/path/to/Raspberry-Pi-Router-Screen
-
-[Install]
-WantedBy=multi-user.target
-```
-
 ## Troubleshooting
 - Verify the display appears on I2C: `i2cdetect -y 1`
-- Button not working / "Failed to add edge detection": run with sudo, or ensure RPi.GPIO is installed; the app will fall back to polling automatically
-- Check your button wiring (BCM 17 with pull-up to 3.3V, button to GND)
 - Logs: `journalctl -u your-service-name`
-
-## License
-GPL-3.0 (see LICENSE).
