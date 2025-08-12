@@ -31,16 +31,52 @@ from luma.oled.device import sh1106
 import RPi.GPIO as GPIO
 SCREENSAVER_BUTTON_PIN = 17  # BCM pin number; wire to a momentary button to GND
 screensaver_mode = False
+# Added state for fallback polling
+BUTTON_EVENT_MODE = False
+BUTTON_POLLING = False
+_last_btn_state = 1
+_last_btn_toggle_ts = 0.0
+_button_setup_error = None
 
-def _toggle_mode(channel):
-    """GPIO callback: toggle between page rotation and screensaver."""
+def _toggle_mode(channel=None):
+    """GPIO callback or polling trigger: toggle between page rotation and screensaver."""
     global screensaver_mode
     screensaver_mode = not screensaver_mode
 
 def setup_button(pin=SCREENSAVER_BUTTON_PIN):
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # button to GND
-    GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle_mode, bouncetime=300)
+    global BUTTON_EVENT_MODE, BUTTON_POLLING, _button_setup_error, _last_btn_state
+    try:
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # button to GND
+        GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle_mode, bouncetime=300)
+        BUTTON_EVENT_MODE = True
+    except Exception as e:
+        # Fallback: simple polling (no crash)
+        _button_setup_error = str(e)
+        BUTTON_POLLING = True
+        try:
+            # Ensure pin configured if earlier failed mid-way
+            if not BUTTON_EVENT_MODE:
+                GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        except Exception:
+            BUTTON_POLLING = False  # give up entirely
+        _last_btn_state = GPIO.input(pin) if BUTTON_POLLING else 1
+
+def _poll_button(pin=SCREENSAVER_BUTTON_PIN, debounce_ms=250):
+    """Software-debounce polling fallback when edge detection unavailable."""
+    global _last_btn_state, _last_btn_toggle_ts
+    if not BUTTON_POLLING:
+        return
+    try:
+        state = GPIO.input(pin)
+    except Exception:
+        return
+    now = time.time()
+    if _last_btn_state == 1 and state == 0:  # falling edge
+        if (now - _last_btn_toggle_ts) * 1000 > debounce_ms:
+            _last_btn_toggle_ts = now
+            _toggle_mode()
+    _last_btn_state = state
 
 # -----------------------------
 # Utility helpers (shell-safe)
@@ -502,6 +538,9 @@ def main():
 
     try:
         while True:
+            # Poll button if edge detection failed
+            _poll_button()
+
             # If in screensaver mode, run the animation until toggled off
             if screensaver_mode:
                 bouncing_raspberry(device, seconds=3600, fps=25)

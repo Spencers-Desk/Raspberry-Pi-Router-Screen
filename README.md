@@ -20,8 +20,7 @@ Note: The nftables NAT screen and related functions were removed.
 
 ## Software requirements
 ```bash
-sudo apt install -y python3-pil python3-smbus python3-rpi.gpio
-pip3 install --upgrade luma.oled
+sudo apt install -y python3-pil python3-smbus python3-rpi.gpio python3-luma.oled
 ```
 
 ## Wire the Screen and Button
@@ -134,6 +133,7 @@ WantedBy=multi-user.target
 
 ## Troubleshooting
 - Verify the display appears on I2C: `i2cdetect -y 1`
+- Button not working / "Failed to add edge detection": run with sudo, or ensure RPi.GPIO is installed; the app will fall back to polling automatically
 - Check your button wiring (BCM 17 with pull-up to 3.3V, button to GND)
 - Logs: `journalctl -u your-service-name`
 
