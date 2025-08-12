@@ -11,14 +11,9 @@ Pages:
   5) Throughput (kbit/s) for eth0 and wlan0
   6) CPU temp, CPU usage %, load, memory used/total (MB)
 
-Requirements:
-  sudo apt install python3-pil python3-smbus i2c-tools python3-rpi.gpio
-  pip3 install luma.oled
+Button (BCM17 -> GND) cycles modes: Pages -> Screensaver -> Off.
 
-Environment:
-  SCREEN_DEBUG=1          Enable debug logging
-  SCREEN_LOG=/path/file   Append debug log to file
-  SCREENSAVER_BITMAP=path Override screensaver bitmap (default: raspberry.bmp)
+Place Raspberry_Pi_Logo.bmp (1‑bit or any format convertible) in the same directory for the screensaver.
 """
 
 import os
@@ -33,33 +28,23 @@ from PIL import Image, ImageDraw, ImageFont
 from luma.core.interface.serial import i2c
 from luma.oled.device import sh1106
 
-# --- Debug / logging helpers --------------------------------------------------
-DEBUG = os.environ.get("SCREEN_DEBUG", "0") not in ("0", "", "false", "False")
-LOG_PATH = os.environ.get("SCREEN_LOG", "")  # optional file path
-
-def debug(msg):
-    if not DEBUG:
-        return
-    line = f"[SCREEN] {time.strftime('%H:%M:%S')} {msg}"
-    try:
-        print(line, flush=True)
-    except Exception:
-        pass
-    if LOG_PATH:
+# --- Debug (manual toggle if needed) ------------------------------------------
+DEBUG = False
+def debug(msg): 
+    if DEBUG:
         try:
-            with open(LOG_PATH, "a") as f:
-                f.write(line + "\n")
+            print(f"[SCREEN] {time.strftime('%H:%M:%S')} {msg}", flush=True)
         except Exception:
             pass
 
 # --- Button toggle (GPIO) -----------------------------------------------------
 try:
     import RPi.GPIO as GPIO
-except Exception as e:
+except Exception:
     GPIO = None
-    debug(f"GPIO import failed: {e}")
+    debug("GPIO import failed")
 
-SCREENSAVER_BUTTON_PIN = 17  # BCM pin number; wire to a momentary button to GND
+SCREENSAVER_BUTTON_PIN = 17  # BCM (GPIO) pin number; wire to a momentary button to GND
 
 # Display modes
 MODE_PAGES = 0
@@ -68,7 +53,6 @@ MODE_OFF   = 2
 display_mode = MODE_PAGES
 
 # Button fallback / polling state
-BUTTON_EVENT_OK = False
 BUTTON_POLLING = False
 _btn_last_state = 1
 _btn_last_toggle_ts = 0.0
@@ -80,12 +64,11 @@ def _cycle_mode(channel=None):
     """
     global display_mode
     display_mode = (display_mode + 1) % 3  # 0..2
-    debug(f"Button: cycle -> mode {display_mode}")
+    debug(f"Mode -> {display_mode}")
 
 def setup_button(pin=SCREENSAVER_BUTTON_PIN):
-    global BUTTON_EVENT_OK, BUTTON_POLLING, _btn_last_state
+    global BUTTON_POLLING, _btn_last_state
     if GPIO is None:
-        debug("GPIO unavailable; button disabled")
         return
     try:
         GPIO.setmode(GPIO.BCM)
@@ -96,21 +79,16 @@ def setup_button(pin=SCREENSAVER_BUTTON_PIN):
         except Exception:
             pass
         GPIO.add_event_detect(pin, GPIO.FALLING, callback=_cycle_mode, bouncetime=300)
-        BUTTON_EVENT_OK = True
-        BUTTON_POLLING = False
-        debug(f"Button edge-detect active on BCM {pin}")
-    except Exception as e:
-        debug(f"Edge detect setup failed ({e}); falling back to polling")
-        BUTTON_EVENT_OK = False
+        debug(f"Edge detect on BCM {pin}")
+    except Exception:
+        debug("Edge detect failed; using polling")
         try:
-            # Ensure pin still configured
             GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             _btn_last_state = GPIO.input(pin)
             BUTTON_POLLING = True
-            debug("Polling mode enabled for button")
-        except Exception as e2:
+        except Exception:
             BUTTON_POLLING = False
-            debug(f"Polling fallback failed: {e2}; button disabled")
+            debug("Polling setup failed")
 
 def poll_button(pin=SCREENSAVER_BUTTON_PIN):
     """
@@ -121,8 +99,7 @@ def poll_button(pin=SCREENSAVER_BUTTON_PIN):
         return
     try:
         state = GPIO.input(pin)
-    except Exception as e:
-        debug(f"GPIO input error: {e}")
+    except Exception:
         return
     if _btn_last_state == 1 and state == 0:  # falling edge
         now = time.time()
@@ -131,7 +108,6 @@ def poll_button(pin=SCREENSAVER_BUTTON_PIN):
             _cycle_mode()
     _btn_last_state = state
 
-# Responsive sleep with button polling
 def sleep_poll(duration, slice_sec=0.05):
     """
     Sleep up to 'duration' seconds in small slices while polling the button
@@ -147,61 +123,41 @@ def sleep_poll(duration, slice_sec=0.05):
             break
         time.sleep(min(slice_sec, duration - (now - start)))
 
-# -----------------------------
-# Utility helpers (shell-safe)
-# -----------------------------
-
+# --- Utility helpers ----------------------------------------------------------
 def run(cmd, timeout=1.0):
     """
     Run a shell command, return (stdout_str, returncode).
     On failure or timeout, returns ("", nonzero).
     """
     try:
-        out = subprocess.check_output(
-            cmd, stderr=subprocess.DEVNULL, timeout=timeout, shell=True
-        )
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=timeout, shell=True)
         return out.decode("utf-8", "ignore").strip(), 0
     except Exception:
         return "", 1
 
-
-def get_hostname():
-    return socket.gethostname()
-
-
-def get_time_str():
-    # Local time in HH:MM:SS; tweak as you prefer
-    return datetime.now().strftime("%H:%M:%S")
-
+def get_hostname(): return socket.gethostname()
+def get_time_str(): return datetime.now().strftime("%H:%M:%S")
 
 def get_uptime_str():
     try:
         with open("/proc/uptime") as f:
             seconds = float(f.read().split()[0])
         td = timedelta(seconds=int(seconds))
-        # Short human-ish form: Dd HH:MM
         days = td.days
         hours, rem = divmod(td.seconds, 3600)
         minutes, _ = divmod(rem, 60)
-        if days > 0:
-            return f"{days}d {hours:02d}:{minutes:02d}"
-        return f"{hours:02d}:{minutes:02d}"
+        return f"{days}d {hours:02d}:{minutes:02d}" if days else f"{hours:02d}:{minutes:02d}"
     except Exception:
-        return "uptime: ?"    
-
+        return "uptime: ?"
 
 def get_iface_ip(iface):
     """
     Return IPv4 address of an interface via `ip -4 addr show`.
-
-
     """
     out, rc = run(f"/sbin/ip -4 addr show dev {iface}")
     if rc != 0 or "inet " not in out:
         return "-"
     # Parse like: "inet 192.168.1.2/24 ..."
-
-
     for line in out.splitlines():
         line = line.strip()
         if line.startswith("inet "):
@@ -237,6 +193,8 @@ def get_wifi_info(iface="wlan0"):
     out, rc = run(f"/usr/sbin/iw dev {iface} link")
     if rc != 0:
         return ("wifi: down", None)
+    if "Not connected." in out:
+        return ("wifi: not conn", None)
     ssid, rssi = "-", None
     for line in out.splitlines():
         line = line.strip()
@@ -248,8 +206,6 @@ def get_wifi_info(iface="wlan0"):
                 rssi = int(line.split()[1])
             except Exception:
                 rssi = None
-    if "Not connected." in out:
-        return ("wifi: not conn", None)
     return (ssid, rssi)
 
 
@@ -258,7 +214,7 @@ def count_dnsmasq_leases(path="/var/lib/misc/dnsmasq.leases"):
     Count active DHCP leases by reading dnsmasq's leases file.
     """
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             # Each non-empty line is a lease record
             return sum(1 for line in f if line.strip())
     except Exception:
@@ -287,20 +243,17 @@ class Throughput:
     """
     Track per-interface throughput from rx/tx byte counters.
     """
-    def __init__(self):
-        self.prev = {}  # iface -> (ts, rx_bytes, tx_bytes)
-
+    def __init__(self): self.prev = {}
     def read_bytes(self, iface):
         try:
             with open(f"/sys/class/net/{iface}/statistics/rx_bytes") as f:
                 rx = int(f.read().strip())
             with open(f"/sys/class/net/{iface}/statistics/tx_bytes") as f:
                 tx = int(f.read().strip())
-            return (rx, tx)
+            return rx, tx
         except Exception:
-            return (None, None)
-
-    def kbit_s(self, iface, interval=1.0):
+            return None, None
+    def kbit_s(self, iface):
         """
         Return (rx_kbit_s, tx_kbit_s). On first call per iface, returns (0,0).
         """
@@ -313,10 +266,10 @@ class Throughput:
             return (0, 0)
         ts_prev, rx_prev, tx_prev = self.prev[iface]
         dt = max(0.001, now - ts_prev)
-        rx_kbit = int(((rx - rx_prev) * 8) / 1000 / dt)
-        tx_kbit = int(((tx - tx_prev) * 8) / 1000 / dt)
+        rx_k = int(((rx - rx_prev) * 8) / 1000 / dt)
+        tx_k = int(((tx - tx_prev) * 8) / 1000 / dt)
         self.prev[iface] = (now, rx, tx)
-        return (max(0, rx_kbit), max(0, tx_kbit))
+        return (max(0, rx_k), max(0, tx_k))
 
 
 def get_cpu_temp_c():
@@ -338,8 +291,7 @@ def get_cpu_temp_c():
 
 def get_loadavg():
     try:
-        one, five, fifteen = os.getloadavg()
-        return (one, five, fifteen)
+        return os.getloadavg()
     except Exception:
         return (0.0, 0.0, 0.0)
 
@@ -354,89 +306,66 @@ def get_mem_usage_mb():
             for line in f:
                 k, v = line.split(":", 1)
                 data[k.strip()] = v.strip()
-        def kB(name): return int(data[name].split()[0])
-        total = kB("MemTotal")
-        avail = kB("MemAvailable")
+        def kB(n): return int(data[n].split()[0])
+        total = kB("MemTotal"); avail = kB("MemAvailable")
         used = total - avail
         return int(used / 1024), int(total / 1024)
     except Exception:
-        return None, None
+        return (None, None)
 
 class CPUUsage:
     """
     Track CPU usage percentage using /proc/stat deltas.
     """
-    def __init__(self):
-        self.prev_total = None
-        self.prev_idle = None
-
+    def __init__(self): self.prev_total = None; self.prev_idle = None
     def percent(self):
         try:
             with open("/proc/stat") as f:
                 line = f.readline()
             if not line.startswith("cpu "):
                 return 0.0
-            parts = line.split()
-            # user nice system idle iowait irq softirq steal
-            vals = list(map(int, parts[1:9]))
-            user, nice, system, idle, iowait, irq, softirq, steal = vals
+            parts = list(map(int, line.split()[1:9]))
+            user, nice, system, idle, iowait, irq, softirq, steal = parts
             idle_all = idle + iowait
-            total = sum(vals)
+            total = sum(parts)
             if self.prev_total is None:
-                self.prev_total = total
-                self.prev_idle = idle_all
+                self.prev_total, self.prev_idle = total, idle_all
                 return 0.0
             dt_total = total - self.prev_total
             dt_idle = idle_all - self.prev_idle
-            self.prev_total = total
-            self.prev_idle = idle_all
+            self.prev_total, self.prev_idle = total, idle_all
             if dt_total <= 0:
                 return 0.0
-            usage = (dt_total - dt_idle) / dt_total * 100.0
-            return max(0.0, min(100.0, usage))
+            return max(0.0, min(100.0, (dt_total - dt_idle) / dt_total * 100.0))
         except Exception:
             return 0.0
 
 
-# -----------------------------
-# Display helpers
-# -----------------------------
-
+# --- Display helpers ----------------------------------------------------------
 def make_device(i2c_port=1, i2c_address=0x3C, rotate=0):
     serial = i2c(port=i2c_port, address=i2c_address)
-    dev = sh1106(serial, rotate=rotate)
-    # Set contrast if you like; 0..255
-    # dev.contrast(255)
-    return dev
-
+    return sh1106(serial, rotate=rotate)
 
 def draw_lines(device, lines, small=False):
     """
     Draw up to 6 lines of text neatly spaced on the 128x64 canvas.
     """
-    width = device.width
-    height = device.height
-    image = Image.new("1", (width, height))
-    draw = ImageDraw.Draw(image)
-    # Use default bitmap font for crispness
+    image = Image.new("1", (device.width, device.height))
+    d = ImageDraw.Draw(image)
     font = ImageFont.load_default()
     line_h = 10 if small else 11
     y = 0
     for text in lines[:6]:
-        draw.text((0, y), text, font=font, fill=255)
+        d.text((0, y), text, font=font, fill=255)
         y += line_h
     device.display(image)
 
-
-# Add missing blank_screen (used when MODE_OFF)
 def blank_screen(device):
     """Blank (turn off) the OLED contents."""
     try:
-        img = Image.new("1", (device.width, device.height), 0)
-        device.display(img)
-    except Exception as e:
-        debug(f"blank_screen error: {e}")
-
+        device.display(Image.new("1", (device.width, device.height), 0))
+    except Exception:
+        pass
 
 def bar(draw, x, y, w, h, frac):
     """
@@ -444,10 +373,9 @@ def bar(draw, x, y, w, h, frac):
     """
     frac = max(0.0, min(1.0, frac))
     draw.rectangle((x, y, x+w-1, y+h-1), outline=1, fill=0)
-    fill_w = int((w-2) * frac)
-    if fill_w > 0:
-        draw.rectangle((x+1, y+1, x+1+fill_w, y+h-2), outline=1, fill=1)
-
+    fw = int((w - 2) * frac)
+    if fw > 0:
+        draw.rectangle((x+1, y+1, x+1+fw, y+h-2), outline=1, fill=1)
 
 def draw_throughput(device, eth_k, wlan_k):
     """
@@ -455,64 +383,51 @@ def draw_throughput(device, eth_k, wlan_k):
     eth_k, wlan_k: tuples (rx_kbit, tx_kbit)
     Bar scale: total (RX+TX) capped at ~5 Mbit/s (adjust divisor if desired).
     """
-    width, height = device.width, device.height
-    image = Image.new("1", (width, height))
-    draw = ImageDraw.Draw(image)
+    width = device.width
+    image = Image.new("1", (width, device.height))
+    d = ImageDraw.Draw(image)
     font = ImageFont.load_default()
-
-    # Titles
-    draw.text((0, 0), "THROUGHPUT (kbit/s)", font=font, fill=255)
-    # ETH0
+    d.text((0, 0), "THROUGHPUT (kbit/s)", font=font, fill=255)
     erx, etx = eth_k
-    draw.text((0, 14), f"eth0 RX:{erx:4d}  TX:{etx:4d}", font=font, fill=255)
-    bar(draw, 0, 24, width, 8, min(1.0, (erx + etx) / 5000.0))  # scale bar vs ~5 Mbit/s
-
-    # WLAN0
+    d.text((0, 14), f"eth0 RX:{erx:4d}  TX:{etx:4d}", font=font, fill=255)
+    bar(d, 0, 24, width, 8, min(1.0, (erx + etx)/5000.0))
     wrx, wtx = wlan_k
-    draw.text((0, 38), f"wlan0 RX:{wrx:4d} TX:{wtx:4d}", font=font, fill=255)
-    bar(draw, 0, 48, width, 8, min(1.0, (wrx + wtx) / 5000.0))
-
+    d.text((0, 38), f"wlan0 RX:{wrx:4d} TX:{wtx:4d}", font=font, fill=255)
+    bar(d, 0, 48, width, 8, min(1.0, (wrx + wtx)/5000.0))
     device.display(image)
-
 
 def draw_wifi_page(device, wan_ip, ssid, rssi, ok):
     """
     WAN / Wi-Fi page with explicit signal line (dBm); removed unlabeled bar.
     """
-    width, height = device.width, device.height
-    image = Image.new("1", (width, height))
-    draw = ImageDraw.Draw(image)
+    image = Image.new("1", (device.width, device.height))
+    d = ImageDraw.Draw(image)
     font = ImageFont.load_default()
-    draw.text((0, 0), "WAN/ Wi-Fi", font=font, fill=255)
-    draw.text((0, 12), f"WAN: {wan_ip}", font=font, fill=255)
-    status = "OK" if ok else "NO NET"
-    draw.text((0, 24), f"NET: {status}", font=font, fill=255)
-    draw.text((0, 36), f"SSID: {ssid[:16]}", font=font, fill=255)
-    sig_txt = "sig: ?" if rssi is None else f"sig: {rssi}dBm"
-    draw.text((0, 48), sig_txt, font=font, fill=255)
+    d.text((0, 0), "WAN/ Wi-Fi", font=font, fill=255)
+    d.text((0, 12), f"WAN: {wan_ip}", font=font, fill=255)
+    d.text((0, 24), f"NET: {'OK' if ok else 'NO NET'}", font=font, fill=255)
+    d.text((0, 36), f"SSID: {ssid[:16]}", font=font, fill=255)
+    d.text((0, 48), "sig: ?" if rssi is None else f"sig: {rssi}dBm", font=font, fill=255)
     device.display(image)
-
 
 def draw_system_page(device, temp_c, cpu_pct, load_tuple, mem_used_mb, mem_total_mb):
     """
     SYSTEM page without icons: temp, cpu %, load averages, memory used/total.
     """
-    width, height = device.width, device.height
-    image = Image.new("1", (width, height))
-    draw = ImageDraw.Draw(image)
+    image = Image.new("1", (device.width, device.height))
+    d = ImageDraw.Draw(image)
     font = ImageFont.load_default()
-    draw.text((0, 0), "SYSTEM", font=font, fill=255)
-    draw.text((0, 12), f"temp  {temp_c:.1f}C" if temp_c is not None else "temp  ?", font=font, fill=255)
-    draw.text((0, 24), f"cpu   {cpu_pct:5.1f}%", font=font, fill=255)
-    draw.text((0, 36), f"load  {load_tuple[0]:.2f} {load_tuple[1]:.2f} {load_tuple[2]:.2f}", font=font, fill=255)
+    d.text((0, 0), "SYSTEM", font=font, fill=255)
+    d.text((0, 12), f"temp  {temp_c:.1f}C" if temp_c is not None else "temp  ?", font=font, fill=255)
+    d.text((0, 24), f"cpu   {cpu_pct:5.1f}%", font=font, fill=255)
+    d.text((0, 36), f"load  {load_tuple[0]:.2f} {load_tuple[1]:.2f} {load_tuple[2]:.2f}", font=font, fill=255)
     if mem_used_mb is not None and mem_total_mb is not None:
-        draw.text((0, 48), f"mem   {mem_used_mb}/{mem_total_mb} MB", font=font, fill=255)
+        d.text((0, 48), f"mem   {mem_used_mb}/{mem_total_mb} MB", font=font, fill=255)
     else:
-        draw.text((0, 48), "mem   ?", font=font, fill=255)
+        d.text((0, 48), "mem   ?", font=font, fill=255)
     device.display(image)
 
-# -----------------------------
-# Screensaver bitmap config (simplified)
+# --- Screensaver bitmap -------------------------------------------------------
 SCREENSAVER_BITMAP_FILENAME = "Raspberry_Pi_Logo.bmp"
 _SAVER_SPRITE = None
 
@@ -525,29 +440,23 @@ def load_saver_sprite(max_side=48):
     if _SAVER_SPRITE is not None:
         return _SAVER_SPRITE
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(script_dir, SCREENSAVER_BITMAP_FILENAME)
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), SCREENSAVER_BITMAP_FILENAME)
         img = Image.open(path)
         if img.mode != "1":
             img = img.convert("L").point(lambda v: 255 if v > 128 else 0, mode="1")
         w, h = img.size
         if max(w, h) > max_side:
             scale = max_side / max(w, h)
-            new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-            img = img.resize(new_size, Image.NEAREST)
+            img = img.resize((max(1, int(w*scale)), max(1, int(h*scale))), Image.NEAREST)
         _SAVER_SPRITE = img
-        debug(f"Screensaver sprite loaded: {SCREENSAVER_BITMAP_FILENAME} size={img.size}")
-        return _SAVER_SPRITE
-    except Exception as e:
-        debug(f"Screensaver bitmap load failed: {e}")
-        # Fallback tiny placeholder
+    except Exception:
         ph = Image.new("1", (24, 24), 0)
         d = ImageDraw.Draw(ph)
         d.rectangle((0, 0, 23, 23), outline=1, fill=0)
         d.text((4, 8), "NO", font=ImageFont.load_default(), fill=1)
         d.text((4, 16), "IMG", font=ImageFont.load_default(), fill=1)
         _SAVER_SPRITE = ph
-        return _SAVER_SPRITE
+    return _SAVER_SPRITE
 
 def bouncing_raspberry(device, fps=25):
     """
@@ -562,13 +471,11 @@ def bouncing_raspberry(device, fps=25):
     # Safety shrink (unexpected)
     if sw > width or sh > height:
         scale = min(width / sw, height / sh, 1.0)
-        new_size = (max(1, int(sw * scale)), max(1, int(sh * scale)))
-        sprite = sprite.resize(new_size, Image.NEAREST)
+        sprite = sprite.resize((max(1, int(sw*scale)), max(1, int(sh*scale))), Image.NEAREST)
         sw, sh = sprite.size
-    x, y = (width - sw) // 2, (height - sh) // 2
+    x, y = (width - sw)//2, (height - sh)//2
     vx, vy = 1, 1
     dt = 1.0 / max(1, fps)
-    debug("Entering screensaver")
     while display_mode == MODE_SAVER:
         poll_button()
         if display_mode != MODE_SAVER:
@@ -576,29 +483,21 @@ def bouncing_raspberry(device, fps=25):
         frame = Image.new("1", (width, height))
         frame.paste(sprite, (x, y), sprite)
         device.display(frame)
-        x += vx
-        y += vy
+        x += vx; y += vy
         if x <= 0 or x + sw >= width:
-            vx = -vx
-            x = max(0, min(x, width - sw))
+            vx = -vx; x = max(0, min(x, width - sw))
         if y <= 0 or y + sh >= height:
-            vy = -vy
-            y = max(0, min(y, height - sh))
+            vy = -vy; y = max(0, min(y, height - sh))
         time.sleep(dt)
-    debug("Leaving screensaver")
     time.sleep(0.05)
 
-# -----------------------------
-# Main loop
-# -----------------------------
-
+# --- Main loop ----------------------------------------------------------------
 def main():
-    debug("Starting status_screen")
+    debug("Starting")
     try:
         device = make_device()
-        debug("OLED device initialized")
     except Exception as e:
-        debug(f"OLED init failed: {e}")
+        print(f"OLED init failed: {e}")
         traceback.print_exc()
         return
     tput = Throughput()
@@ -608,111 +507,81 @@ def main():
     page_idx = 0
     page_sw_every = 5.0
     last_switch = 0.0
-    off_cleared = False  # track if we've already blanked in OFF mode
-
+    off_cleared = False
     try:
         while True:
-            # Always poll in case event detect missed or we are in fallback
             poll_button()
-
             mode = display_mode
-
             if mode == MODE_SAVER:
-                if DEBUG: debug("Mode = SAVER")
-                if off_cleared: debug("Leaving OFF mode")
-                bouncing_raspberry(device)  # returns when mode changes
+                if off_cleared: off_cleared = False
+                bouncing_raspberry(device)
                 continue
             if mode == MODE_OFF:
-                if DEBUG: debug("Mode = OFF")
                 if not off_cleared:
                     blank_screen(device)
                     off_cleared = True
                 time.sleep(0.25)
                 continue
             else:
-                if DEBUG and off_cleared: debug("Mode = PAGES (resuming)")
-                off_cleared = False
-
+                if off_cleared:
+                    off_cleared = False
             now = time.time()
             if now - last_switch >= page_sw_every:
                 page_idx = (page_idx + 1) % len(pages)
                 last_switch = now
-
             page = pages[page_idx]
-
-            if DEBUG:
-                debug(f"Page={page}")
-
             try:
                 if page == "host":
-                    lines = [
-                        f"{get_hostname()}",
+                    draw_lines(device, [
+                        get_hostname(),
                         f"time  {get_time_str()}",
                         f"up    {get_uptime_str()}",
                         f"WAN   {get_default_route_ip()}",
                         f"LAN   {get_iface_ip('eth0')}",
-                    ]
-                    draw_lines(device, lines)
+                    ])
                 elif page == "wan":
                     wan_ip = get_default_route_ip()
                     ssid, rssi = get_wifi_info("wlan0")
-                    ok = internet_ok()
-                    draw_wifi_page(device, wan_ip, ssid, rssi, ok)
+                    draw_wifi_page(device, wan_ip, ssid, rssi, internet_ok())
                 elif page == "lan":
-                    leases = count_dnsmasq_leases()
-                    lines = [
+                    draw_lines(device, [
                         "LAN / DHCP",
                         f"eth0  {get_iface_ip('eth0')}",
-                        f"leases {leases}",
+                        f"leases {count_dnsmasq_leases()}",
                         "",
                         "",
-                    ]
-                    draw_lines(device, lines)
+                    ])
                 elif page == "ts":
-                    lines = [
+                    draw_lines(device, [
                         "TAILSCALE",
                         f"IP4  {get_tailscale_ip()}",
                         "",
                         "",
                         "",
-                    ]
-                    draw_lines(device, lines)
+                    ])
                 elif page == "tput":
-                    # replace fixed 1s sleep with responsive sleep
                     sleep_poll(1.0)
-                    eth = tput.kbit_s("eth0")
-                    wlan = tput.kbit_s("wlan0")
-                    draw_throughput(device, eth, wlan)
+                    draw_throughput(device, tput.kbit_s("eth0"), tput.kbit_s("wlan0"))
                 elif page == "sys":
                     temp = get_cpu_temp_c()
                     load = get_loadavg()
                     cpu_pct = cpu_usage.percent()
                     mem_used, mem_total = get_mem_usage_mb()
                     draw_system_page(device, temp, cpu_pct, load, mem_used, mem_total)
-            except Exception as e:
-                debug(f"Page render error ({page}): {e}")
-                traceback.print_exc()
+            except Exception:
                 draw_lines(device, ["OLED error", "retrying..."])
                 time.sleep(0.5)
-
             if page != "tput":
                 sleep_poll(1.0)
     except KeyboardInterrupt:
-        debug("Interrupted by user")
-    except Exception as e:
-        debug(f"Fatal loop error: {e}")
-        traceback.print_exc()
+        pass
     finally:
         if GPIO:
-            try:
-                GPIO.cleanup()
-                debug("GPIO cleaned up")
-            except Exception as e:
-                debug(f"GPIO cleanup error: {e}")
+            try: GPIO.cleanup()
+            except Exception: pass
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:
-        debug(f"Top-level exception: {e}")
+    except Exception:
         traceback.print_exc()
