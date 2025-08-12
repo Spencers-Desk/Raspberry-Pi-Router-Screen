@@ -344,19 +344,16 @@ def draw_wifi_page(device, wan_ip, ssid, rssi, ok):
     device.display(image)
 
 # --- Fun: Bouncing Raspberry "logo" ------------------------------------------
-# from PIL import Image, ImageDraw, ImageFont  # already imported above
 def frame_raspberry(image, x, y, scale=1.0):
     """
     Draw a simple raspberry (3-circle berry + leaves) onto the provided 1-bit PIL Image.
     (x, y) is the top-left of the drawing box.
     """
     draw = ImageDraw.Draw(image)
-    # Basic proportions for a ~32x32 berry before scaling
     S = scale
     bx, by = int(x), int(y)
 
     # Berry body: three overlapping circles
-    # Center positions relative to (x,y)
     circles = [
         (bx + int(10*S), by + int(10*S), int(10*S)),  # left
         (bx + int(22*S), by + int(10*S), int(10*S)),  # right
@@ -365,46 +362,130 @@ def frame_raspberry(image, x, y, scale=1.0):
     for cx, cy, r in circles:
         draw.ellipse((cx-r, cy-r, cx+r, cy+r), fill=1, outline=1)
 
-    # Leaves: two small circles/ovals on top
+    # Leaves: two small ovals on top
     draw.ellipse((bx + int(10*S), by + int(-2*S), bx + int(16*S), by + int(4*S)), fill=1, outline=1)
     draw.ellipse((bx + int(16*S), by + int(-2*S), bx + int(22*S), by + int(4*S)), fill=1, outline=1)
 
 def bouncing_raspberry(device, seconds=8, fps=25):
     """
     Animate a bouncing raspberry within the OLED bounds.
-    When screensaver_mode is toggled off, this returns immediately.
+    Exits immediately when screensaver_mode is toggled off.
     """
     global screensaver_mode
     width, height = device.width, device.height
-    # Start roughly centered; sprite is ~32x32
     w, h = 32, 32
     x, y = (width - w) // 2, (height - h) // 2
-    vx, vy = 1, 1  # pixels per frame
+    vx, vy = 1, 1
     dt = 1.0 / max(1, fps)
     end_time = time.time() + seconds
 
     while time.time() < end_time and screensaver_mode:
         img = Image.new("1", (width, height))
-        # Draw the sprite
         frame_raspberry(img, x, y, scale=1.0)
-        # Optional caption
         ImageDraw.Draw(img).text((0, 0), "Raspberry Pi", font=ImageFont.load_default(), fill=1)
         device.display(img)
 
-        # Advance position
         x += vx
         y += vy
 
-        # Bounce on edges
         if x <= 0 or x + w >= width:
             vx = -vx
             x = max(0, min(x, width - w))
-        if y <= 10 or y + h >= height:  # keep below caption line
+        if y <= 10 or y + h >= height:  # keep below caption
             vy = -vy
             y = max(10, min(y, height - h))
 
         time.sleep(dt)
 
+# --- Temp icons and system page ----------------------------------------------
+def draw_temp_icon(draw, x, y, temp_c=None, height=18):
+    """
+    Draw a small thermometer at (x, y). Optionally fill mercury based on temp.
+    """
+    w = 8
+    cx = x + w // 2
+    r = 4
+    tube_top = y
+    tube_bottom = y + height - r
+
+    # Tube and bulb outlines
+    draw.rectangle((cx - 2, tube_top, cx + 2, tube_bottom), outline=1, fill=0)
+    draw.ellipse((cx - r, tube_bottom - r, cx + r, tube_bottom + r), outline=1, fill=0)
+
+    if temp_c is not None:
+        # Fill mercury level (0C..80C mapped)
+        frac = max(0.0, min(1.0, float(temp_c) / 80.0))
+        level_y = int(tube_bottom - max(1, int(frac * (tube_bottom - tube_top - 2))))
+        draw.rectangle((cx - 1, level_y, cx + 1, tube_bottom), fill=1)
+        # Fill bulb
+        draw.ellipse((cx - (r - 1), tube_bottom - (r - 1), cx + (r - 1), tube_bottom + (r - 1)), fill=1)
+
+def draw_snowflake(draw, x, y, size=12):
+    """
+    Draw a simple snowflake centered in a size x size box at (x, y).
+    """
+    cx = x + size // 2
+    cy = y + size // 2
+    L = max(3, size // 2)
+    draw.line((cx - L, cy, cx + L, cy), fill=1)
+    draw.line((cx, cy - L, cx, cy + L), fill=1)
+    draw.line((cx - L + 1, cy - L + 1, cx + L - 1, cy + L - 1), fill=1)
+    draw.line((cx - L + 1, cy + L - 1, cx + L - 1, cy - L + 1), fill=1)
+
+def draw_flame(draw, x, y, size=12):
+    """
+    Draw a small filled flame shape within a size x size box at (x, y).
+    """
+    cx = x + size // 2
+    top = y
+    left = x + 2
+    right = x + size - 3
+    bottom = y + size - 2
+    pts = [
+        (cx, top),       # tip
+        (left, bottom - 3),
+        (cx, bottom),    # base center
+        (right, bottom - 3),
+    ]
+    draw.polygon(pts, outline=1, fill=1)
+
+def draw_system_page(device, temp_c, load_tuple, mem_used_mb):
+    """
+    Render the SYSTEM page with a thermometer icon and a snowflake/flame
+    depending on temperature threshold (50C).
+    """
+    width, height = device.width, device.height
+    image = Image.new("1", (width, height))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+
+    # Text
+    draw.text((0, 0), "SYSTEM", font=font, fill=255)
+    if temp_c is not None:
+        draw.text((0, 12), f"temp  {temp_c:.1f}C", font=font, fill=255)
+    else:
+        draw.text((0, 12), "temp  ?", font=font, fill=255)
+    draw.text((0, 24), f"load  {load_tuple[0]:.2f} {load_tuple[1]:.2f} {load_tuple[2]:.2f}", font=font, fill=255)
+    if mem_used_mb is not None:
+        draw.text((0, 36), f"mem   {mem_used_mb} MB used", font=font, fill=255)
+    else:
+        draw.text((0, 36), "mem   ?", font=font, fill=255)
+
+    # Icons near temp line
+    temp_y = 10  # aligns with y=12 text baseline
+    thermo_x = width - 26
+    badge_x = thermo_x + 12
+    if temp_c is not None:
+        draw_temp_icon(draw, thermo_x, temp_y - 2, temp_c=temp_c, height=18)
+        if temp_c < 50.0:
+            draw_snowflake(draw, badge_x, temp_y - 2, size=12)
+        else:
+            draw_flame(draw, badge_x, temp_y - 2, size=12)
+    else:
+        # Draw an empty thermometer if temp unavailable
+        draw_temp_icon(draw, thermo_x, temp_y - 2, temp_c=None, height=18)
+
+    device.display(image)
 
 # -----------------------------
 # Main loop
@@ -482,14 +563,8 @@ def main():
                     temp = get_cpu_temp_c()
                     load = get_loadavg()
                     mem = get_mem_used_mb()
-                    lines = [
-                        "SYSTEM",
-                        f"temp  {temp:.1f}C" if temp is not None else "temp  ?",
-                        f"load  {load[0]:.2f} {load[1]:.2f} {load[2]:.2f}",
-                        f"mem   {mem} MB used" if mem is not None else "mem   ?",
-                        "",
-                    ]
-                    draw_lines(device, lines)
+                    # replaced simple text renderer with icon-enhanced system page
+                    draw_system_page(device, temp, load, mem)
 
             except Exception:
                 # Fail safe: briefly show an error page then continue.
