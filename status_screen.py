@@ -30,53 +30,24 @@ from luma.oled.device import sh1106
 # --- Button toggle (GPIO) -----------------------------------------------------
 import RPi.GPIO as GPIO
 SCREENSAVER_BUTTON_PIN = 17  # BCM pin number; wire to a momentary button to GND
-screensaver_mode = False
-# Added state for fallback polling
-BUTTON_EVENT_MODE = False
-BUTTON_POLLING = False
-_last_btn_state = 1
-_last_btn_toggle_ts = 0.0
-_button_setup_error = None
 
-def _toggle_mode(channel=None):
-    """GPIO callback or polling trigger: toggle between page rotation and screensaver."""
-    global screensaver_mode
-    screensaver_mode = not screensaver_mode
+# Display modes
+MODE_PAGES = 0
+MODE_SAVER = 1
+MODE_OFF   = 2
+display_mode = MODE_PAGES
+
+def _cycle_mode(channel):
+    """
+    Cycle display mode: PAGES -> SAVER -> OFF -> PAGES ...
+    """
+    global display_mode
+    display_mode = (display_mode + 1) % 3  # 0..2
 
 def setup_button(pin=SCREENSAVER_BUTTON_PIN):
-    global BUTTON_EVENT_MODE, BUTTON_POLLING, _button_setup_error, _last_btn_state
-    try:
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # button to GND
-        GPIO.add_event_detect(pin, GPIO.FALLING, callback=_toggle_mode, bouncetime=300)
-        BUTTON_EVENT_MODE = True
-    except Exception as e:
-        # Fallback: simple polling (no crash)
-        _button_setup_error = str(e)
-        BUTTON_POLLING = True
-        try:
-            # Ensure pin configured if earlier failed mid-way
-            if not BUTTON_EVENT_MODE:
-                GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        except Exception:
-            BUTTON_POLLING = False  # give up entirely
-        _last_btn_state = GPIO.input(pin) if BUTTON_POLLING else 1
-
-def _poll_button(pin=SCREENSAVER_BUTTON_PIN, debounce_ms=250):
-    """Software-debounce polling fallback when edge detection unavailable."""
-    global _last_btn_state, _last_btn_toggle_ts
-    if not BUTTON_POLLING:
-        return
-    try:
-        state = GPIO.input(pin)
-    except Exception:
-        return
-    now = time.time()
-    if _last_btn_state == 1 and state == 0:  # falling edge
-        if (now - _last_btn_toggle_ts) * 1000 > debounce_ms:
-            _last_btn_toggle_ts = now
-            _toggle_mode()
-    _last_btn_state = state
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # button to GND
+    GPIO.add_event_detect(pin, GPIO.FALLING, callback=_cycle_mode, bouncetime=300)
 
 # -----------------------------
 # Utility helpers (shell-safe)
@@ -379,59 +350,56 @@ def draw_wifi_page(device, wan_ip, ssid, rssi, ok):
     bar(draw, 0, 50, width, 10, frac)
     device.display(image)
 
-# --- Fun: Bouncing Raspberry "logo" ------------------------------------------
+# --- Fun: Bouncing Raspberry "logo" -------------------------------------------
 def frame_raspberry(image, x, y, scale=1.0):
     """
     Draw a simple raspberry (3-circle berry + leaves) onto the provided 1-bit PIL Image.
-    (x, y) is the top-left of the drawing box.
     """
     draw = ImageDraw.Draw(image)
     S = scale
     bx, by = int(x), int(y)
-
-    # Berry body: three overlapping circles
     circles = [
-        (bx + int(10*S), by + int(10*S), int(10*S)),  # left
-        (bx + int(22*S), by + int(10*S), int(10*S)),  # right
-        (bx + int(16*S), by + int(4*S),  int(10*S)),  # top
+        (bx + int(10*S), by + int(10*S), int(10*S)),
+        (bx + int(22*S), by + int(10*S), int(10*S)),
+        (bx + int(16*S), by + int(4*S),  int(10*S)),
     ]
     for cx, cy, r in circles:
         draw.ellipse((cx-r, cy-r, cx+r, cy+r), fill=1, outline=1)
-
-    # Leaves: two small ovals on top
     draw.ellipse((bx + int(10*S), by + int(-2*S), bx + int(16*S), by + int(4*S)), fill=1, outline=1)
     draw.ellipse((bx + int(16*S), by + int(-2*S), bx + int(22*S), by + int(4*S)), fill=1, outline=1)
 
-def bouncing_raspberry(device, seconds=8, fps=25):
+def bouncing_raspberry(device, fps=25):
     """
-    Animate a bouncing raspberry within the OLED bounds.
-    Exits immediately when screensaver_mode is toggled off.
+    Run while in MODE_SAVER. Exit immediately when mode changes.
     """
-    global screensaver_mode
+    global display_mode
     width, height = device.width, device.height
     w, h = 32, 32
     x, y = (width - w) // 2, (height - h) // 2
     vx, vy = 1, 1
     dt = 1.0 / max(1, fps)
-    end_time = time.time() + seconds
-
-    while time.time() < end_time and screensaver_mode:
+    font = ImageFont.load_default()
+    while display_mode == MODE_SAVER:
         img = Image.new("1", (width, height))
         frame_raspberry(img, x, y, scale=1.0)
-        ImageDraw.Draw(img).text((0, 0), "Raspberry Pi", font=ImageFont.load_default(), fill=1)
+        ImageDraw.Draw(img).text((0, 0), "Raspberry Pi", font=font, fill=1)
         device.display(img)
-
         x += vx
         y += vy
-
         if x <= 0 or x + w >= width:
             vx = -vx
             x = max(0, min(x, width - w))
-        if y <= 10 or y + h >= height:  # keep below caption
+        if y <= 10 or y + h >= height:
             vy = -vy
             y = max(10, min(y, height - h))
-
         time.sleep(dt)
+
+def blank_screen(device):
+    """
+    Clear (blank) the OLED.
+    """
+    image = Image.new("1", (device.width, device.height))
+    device.display(image)
 
 # --- Temp icons and system page ----------------------------------------------
 def draw_temp_icon(draw, x, y, temp_c=None, height=18):
@@ -533,18 +501,27 @@ def main():
     setup_button()
     pages = ["host", "wan", "lan", "ts", "tput", "sys"]
     page_idx = 0
-    page_sw_every = 5.0   # seconds per page
+    page_sw_every = 5.0
     last_switch = 0.0
+    off_cleared = False  # track if we've already blanked in OFF mode
 
     try:
         while True:
-            # Poll button if edge detection failed
-            _poll_button()
+            mode = display_mode
 
-            # If in screensaver mode, run the animation until toggled off
-            if screensaver_mode:
-                bouncing_raspberry(device, seconds=3600, fps=25)
+            if mode == MODE_SAVER:
+                off_cleared = False  # leaving OFF
+                bouncing_raspberry(device)  # returns when mode changes
                 continue
+
+            if mode == MODE_OFF:
+                if not off_cleared:
+                    blank_screen(device)
+                    off_cleared = True
+                time.sleep(0.25)
+                continue
+            else:
+                off_cleared = False  # ensure redraw once we leave OFF
 
             now = time.time()
             if now - last_switch >= page_sw_every:
@@ -592,7 +569,6 @@ def main():
                     draw_lines(device, lines)
 
                 elif page == "tput":
-                    # compute over ~1s for a smooth number
                     time.sleep(1.0)
                     eth = tput.kbit_s("eth0")
                     wlan = tput.kbit_s("wlan0")
@@ -602,11 +578,9 @@ def main():
                     temp = get_cpu_temp_c()
                     load = get_loadavg()
                     mem = get_mem_used_mb()
-                    # replaced simple text renderer with icon-enhanced system page
                     draw_system_page(device, temp, load, mem)
 
             except Exception:
-                # Fail safe: briefly show an error page then continue.
                 draw_lines(device, ["OLED error", "retrying..."])
                 time.sleep(0.5)
 
@@ -614,7 +588,3 @@ def main():
                 time.sleep(1.0)
     finally:
         GPIO.cleanup()
-
-
-if __name__ == "__main__":
-    main()

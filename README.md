@@ -111,8 +111,9 @@ python3 status_screen.py
 ```
 
 Behavior:
-- By default, the app rotates through the pages every 5 seconds.
-- Press the button (BCM 17 to GND) to toggle a bouncing Raspberry screensaver on/off.
+- Default mode: rotates through pages every 5 seconds.
+- Button cycles modes: Pages -> Screensaver (bouncing Raspberry) -> Off (display blank) -> Pages ...
+- In Off mode the display is blanked but the button still works to wake it (next press returns to Pages).
 
 ## Services (optional)
 Create a simple systemd service to start on boot:
