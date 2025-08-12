@@ -5,15 +5,21 @@ Small status dashboard for a Raspberry Pi router on a 128x64 SH1106 I2C OLED.
 
 Pages:
   1) Hostname, time, uptime
-  2) WAN IP, Internet reachability, Wi-Fi SSID & RSSI (wlan0)
+  2) WAN IP, Internet reachability, Wi-Fi SSID, RSSI (dBm)
   3) LAN IP (eth0), DHCP lease count (dnsmasq)
   4) Tailscale IPv4 (if installed)
   5) Throughput (kbit/s) for eth0 and wlan0
-  6) CPU temp, load, memory used
+  6) CPU temp, CPU usage %, load, memory used/total (MB)
 
 Requirements:
-  sudo apt install python3-pil python3-smbus i2c-tools python3-rpi.gpio
+  sudo apt install python3-pil python3-smbus i2c-tools
+  (optional for button) sudo apt install python3-rpi.gpio
   pip3 install luma.oled
+
+Environment:
+  SCREEN_DEBUG=1          Enable debug logging
+  SCREEN_LOG=/path/file   Append debug log to file
+  SCREENSAVER_BITMAP=path Override screensaver bitmap (default: raspberry.bmp)
 """
 
 import os
@@ -339,9 +345,9 @@ def get_loadavg():
         return (0.0, 0.0, 0.0)
 
 
-def get_mem_used_mb():
+def get_mem_usage_mb():
     """
-    Read MemTotal and MemAvailable from /proc/meminfo.
+    Return (used_mb, total_mb) from /proc/meminfo.
     """
     try:
         data = {}
@@ -349,14 +355,48 @@ def get_mem_used_mb():
             for line in f:
                 k, v = line.split(":", 1)
                 data[k.strip()] = v.strip()
-        def kB(name):
-            return int(data[name].split()[0])
+        def kB(name): return int(data[name].split()[0])
         total = kB("MemTotal")
         avail = kB("MemAvailable")
         used = total - avail
-        return int(used / 1024)
+        return int(used / 1024), int(total / 1024)
     except Exception:
-        return None
+        return None, None
+
+class CPUUsage:
+    """
+    Track CPU usage percentage using /proc/stat deltas.
+    """
+    def __init__(self):
+        self.prev_total = None
+        self.prev_idle = None
+
+    def percent(self):
+        try:
+            with open("/proc/stat") as f:
+                line = f.readline()
+            if not line.startswith("cpu "):
+                return 0.0
+            parts = line.split()
+            # user nice system idle iowait irq softirq steal
+            vals = list(map(int, parts[1:9]))
+            user, nice, system, idle, iowait, irq, softirq, steal = vals
+            idle_all = idle + iowait
+            total = sum(vals)
+            if self.prev_total is None:
+                self.prev_total = total
+                self.prev_idle = idle_all
+                return 0.0
+            dt_total = total - self.prev_total
+            dt_idle = idle_all - self.prev_idle
+            self.prev_total = total
+            self.prev_idle = idle_all
+            if dt_total <= 0:
+                return 0.0
+            usage = (dt_total - dt_idle) / dt_total * 100.0
+            return max(0.0, min(100.0, usage))
+        except Exception:
+            return 0.0
 
 
 # -----------------------------
@@ -404,6 +444,7 @@ def draw_throughput(device, eth_k, wlan_k):
     """
     Draw a slightly richer page with bars.
     eth_k, wlan_k: tuples (rx_kbit, tx_kbit)
+    Bar scale: total (RX+TX) capped at ~5 Mbit/s (adjust divisor if desired).
     """
     width, height = device.width, device.height
     image = Image.new("1", (width, height))
@@ -426,81 +467,121 @@ def draw_throughput(device, eth_k, wlan_k):
 
 
 def draw_wifi_page(device, wan_ip, ssid, rssi, ok):
+    """
+    WAN / Wi-Fi page with explicit signal line (dBm); removed unlabeled bar.
+    """
     width, height = device.width, device.height
     image = Image.new("1", (width, height))
     draw = ImageDraw.Draw(image)
     font = ImageFont.load_default()
-
     draw.text((0, 0), "WAN/ Wi-Fi", font=font, fill=255)
     draw.text((0, 12), f"WAN: {wan_ip}", font=font, fill=255)
     status = "OK" if ok else "NO NET"
     draw.text((0, 24), f"NET: {status}", font=font, fill=255)
     draw.text((0, 36), f"SSID: {ssid[:16]}", font=font, fill=255)
-    # RSSI bar: assume -30dBm best, -90 worst
-    frac = 0.0
-    if rssi is not None:
-        frac = max(0.0, min(1.0, (rssi + 90) / 60.0))
-    bar(draw, 0, 50, width, 10, frac)
+    sig_txt = "sig: ?" if rssi is None else f"sig: {rssi}dBm"
+    draw.text((0, 48), sig_txt, font=font, fill=255)
     device.display(image)
 
-# --- Fun: Bouncing Raspberry "logo" -------------------------------------------
-def raspberry_silhouette(size=(128, 64), y_offset=0):
-    """
-    Create a 1-bit PIL image containing a filled Raspberry Pi silhouette.
-    """
-    img = Image.new("1", size, 0)
-    draw = ImageDraw.Draw(img)
-    W, H = size
-    cx, cy = W // 2, H // 2 + y_offset
-    r = 7
-    dx = 11
-    dy = 9
-    rows = [
-        (-3*dy, 4,  0),
-        (-2*dy, 5, -dx//2),
-        (-1*dy, 6,  0),
-        ( 0*dy, 6, -dx//2),
-        ( 1*dy, 5,  0),
-        ( 2*dy, 4, -dx//2),
-    ]
-    for yoff, count, xshift in rows:
-        start_x = cx - (count-1)*dx//2 + xshift
-        y = cy + yoff
-        for i in range(count):
-            x = start_x + i*dx
-            draw.ellipse((x - r, y - r, x + r, y + r), fill=1, outline=1)
-    core_r_x, core_r_y = 28, 22
-    draw.ellipse((cx - core_r_x, cy - core_r_y, cx + core_r_x, cy + core_r_y), fill=1)
-    top_y = cy - 3*dy - r - 2
-    draw.ellipse((cx - 44, top_y - 24, cx - 4, top_y + 6), fill=1)
-    draw.ellipse((cx + 4,  top_y - 24, cx + 44, top_y + 6), fill=1)
-    draw.polygon([(cx-2, top_y-2), (cx+2, top_y-2), (cx, top_y+6)], fill=0)
-    draw.rectangle((0, cy + 2*dy + r + 5, W, H), fill=0)
-    return img
 
-def build_raspberry_sprite(target_max=40):
+def draw_system_page(device, temp_c, cpu_pct, load_tuple, mem_used_mb, mem_total_mb):
     """
-    Build a trimmed & scaled raspberry sprite (1-bit) suitable for bouncing.
+    SYSTEM page without icons: temp, cpu %, load averages, memory used/total.
     """
-    base = raspberry_silhouette()
-    bbox = base.getbbox()
-    if not bbox:
-        return base.resize((target_max, target_max))
-    cropped = base.crop(bbox)
-    w, h = cropped.size
-    scale = min(target_max / w, target_max / h)
-    new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-    sprite = cropped.resize(new_size, Image.NEAREST)
-    return sprite  # 1-bit image with white silhouette, black background
+    width, height = device.width, device.height
+    image = Image.new("1", (width, height))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+    draw.text((0, 0), "SYSTEM", font=font, fill=255)
+    draw.text((0, 12), f"temp  {temp_c:.1f}C" if temp_c is not None else "temp  ?", font=font, fill=255)
+    draw.text((0, 24), f"cpu   {cpu_pct:5.1f}%", font=font, fill=255)
+    draw.text((0, 36), f"load  {load_tuple[0]:.2f} {load_tuple[1]:.2f} {load_tuple[2]:.2f}", font=font, fill=255)
+    if mem_used_mb is not None and mem_total_mb is not None:
+        draw.text((0, 48), f"mem   {mem_used_mb}/{mem_total_mb} MB", font=font, fill=255)
+    else:
+        draw.text((0, 48), "mem   ?", font=font, fill=255)
+    device.display(image)
+
+# -----------------------------
+# Screensaver bitmap config
+SCREENSAVER_BITMAP_PATH = os.environ.get("SCREENSAVER_BITMAP", "raspberry.bmp")
+_SAVER_SPRITE = None
+
+def _resolve_bitmap_path(p):
+    """
+    Return an absolute path for the bitmap. If relative, try:
+      1) Current working directory
+      2) Script directory
+    """
+    if os.path.isabs(p):
+        return p
+    # Try as-is first
+    if os.path.exists(p):
+        return os.path.abspath(p)
+    # Try script dir
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cand = os.path.join(script_dir, p)
+        if os.path.exists(cand):
+            return cand
+    except Exception:
+        pass
+    return p  # return original (load will fail and fallback will trigger)
+
+def load_saver_sprite(max_side=42):
+    """
+    Load and cache the screensaver bitmap from SCREENSAVER_BITMAP_PATH.
+    - Converts to 1-bit
+    - Trims surrounding black border
+    - Scales so the longer side <= max_side (nearest neighbor)
+    """
+    global _SAVER_SPRITE
+    if _SAVER_SPRITE is not None:
+        return _SAVER_SPRITE
+    try:
+        p = _resolve_bitmap_path(SCREENSAVER_BITMAP_PATH)
+        img = Image.open(p)
+        if img.mode != "1":
+            img = img.convert("L").point(lambda v: 255 if v > 128 else 0, mode="1")
+        bbox = img.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+        w, h = img.size
+        scale = min(1.0, max_side / max(w, h))
+        if scale < 1.0:
+            new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+            img = img.resize(new_size, Image.NEAREST)
+        _SAVER_SPRITE = img
+        debug(f"Screensaver sprite loaded: {p} size={_SAVER_SPRITE.size}")
+        return _SAVER_SPRITE
+    except Exception as e:
+        debug(f"Failed to load screensaver bitmap '{SCREENSAVER_BITMAP_PATH}': {e}")
+        placeholder = Image.new("1", (32, 32), 0)
+        d = ImageDraw.Draw(placeholder)
+        d.rectangle((0, 0, 31, 31), outline=1, fill=0)
+        d.text((4, 10), "NO", font=ImageFont.load_default(), fill=1)
+        d.text((4, 20), "IMG", font=ImageFont.load_default(), fill=1)
+        _SAVER_SPRITE = placeholder
+        return _SAVER_SPRITE
 
 def bouncing_raspberry(device, fps=25):
     """
-    Run while in MODE_SAVER using the detailed silhouette sprite.
+    Run while in MODE_SAVER using the external bitmap sprite.
     """
     global display_mode
-    sprite = build_raspberry_sprite()
+    sprite = load_saver_sprite()
     sw, sh = sprite.size
     width, height = device.width, device.height
+    if width == 0 or height == 0:
+        debug("Device dimensions invalid; aborting screensaver")
+        return
+    # Safety: shrink sprite if larger than display (unexpected)
+    if sw > width or sh > height:
+        scale = min(width / sw, height / sh, 1.0)
+        if scale < 1.0:
+            new_size = (max(1, int(sw * scale)), max(1, int(sh * scale)))
+            sprite = sprite.resize(new_size, Image.NEAREST)
+            sw, sh = sprite.size
     x, y = (width - sw) // 2, (height - sh) // 2
     vx, vy = 1, 1
     dt = 1.0 / max(1, fps)
@@ -511,9 +592,8 @@ def bouncing_raspberry(device, fps=25):
         if display_mode != MODE_SAVER:
             break
         frame = Image.new("1", (width, height))
-        # Title text
+        # Title (remove if pure image desired)
         ImageDraw.Draw(frame).text((0, 0), "Raspberry Pi", font=font, fill=1)
-        # Paste sprite (sprite already 1-bit). Use sprite as mask to preserve silhouette.
         frame.paste(sprite, (x, y), sprite)
         device.display(frame)
         x += vx
@@ -521,111 +601,12 @@ def bouncing_raspberry(device, fps=25):
         if x <= 0 or x + sw >= width:
             vx = -vx
             x = max(0, min(x, width - sw))
-        # Keep below caption line (≈10px) like before
         if y <= 10 or y + sh >= height:
             vy = -vy
             y = max(10, min(y, height - sh))
         time.sleep(dt)
     debug("Leaving screensaver")
     time.sleep(0.05)
-
-def blank_screen(device):
-    """
-    Clear (blank) the OLED.
-    """
-    image = Image.new("1", (device.width, device.height))
-    device.display(image)
-    debug("Display blanked (OFF mode)")
-
-# --- Temp icons and system page ----------------------------------------------
-def draw_temp_icon(draw, x, y, temp_c=None, height=18):
-    """
-    Draw a small thermometer at (x, y). Optionally fill mercury based on temp.
-    """
-    w = 8
-    cx = x + w // 2
-    r = 4
-    tube_top = y
-    tube_bottom = y + height - r
-
-    # Tube and bulb outlines
-    draw.rectangle((cx - 2, tube_top, cx + 2, tube_bottom), outline=1, fill=0)
-    draw.ellipse((cx - r, tube_bottom - r, cx + r, tube_bottom + r), outline=1, fill=0)
-
-    if temp_c is not None:
-        # Fill mercury level (0C..80C mapped)
-        frac = max(0.0, min(1.0, float(temp_c) / 80.0))
-        level_y = int(tube_bottom - max(1, int(frac * (tube_bottom - tube_top - 2))))
-        draw.rectangle((cx - 1, level_y, cx + 1, tube_bottom), fill=1)
-        # Fill bulb
-        draw.ellipse((cx - (r - 1), tube_bottom - (r - 1), cx + (r - 1), tube_bottom + (r - 1)), fill=1)
-
-def draw_snowflake(draw, x, y, size=12):
-    """
-    Draw a simple snowflake centered in a size x size box at (x, y).
-    """
-    cx = x + size // 2
-    cy = y + size // 2
-    L = max(3, size // 2)
-    draw.line((cx - L, cy, cx + L, cy), fill=1)
-    draw.line((cx, cy - L, cx, cy + L), fill=1)
-    draw.line((cx - L + 1, cy - L + 1, cx + L - 1, cy + L - 1), fill=1)
-    draw.line((cx - L + 1, cy + L - 1, cx + L - 1, cy - L + 1), fill=1)
-
-def draw_flame(draw, x, y, size=12):
-    """
-    Draw a small filled flame shape within a size x size box at (x, y).
-    """
-    cx = x + size // 2
-    top = y
-    left = x + 2
-    right = x + size - 3
-    bottom = y + size - 2
-    pts = [
-        (cx, top),       # tip
-        (left, bottom - 3),
-        (cx, bottom),    # base center
-        (right, bottom - 3),
-    ]
-    draw.polygon(pts, outline=1, fill=1)
-
-def draw_system_page(device, temp_c, load_tuple, mem_used_mb):
-    """
-    Render the SYSTEM page with a thermometer icon and a snowflake/flame
-    depending on temperature threshold (50C).
-    """
-    width, height = device.width, device.height
-    image = Image.new("1", (width, height))
-    draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default()
-
-    # Text
-    draw.text((0, 0), "SYSTEM", font=font, fill=255)
-    if temp_c is not None:
-        draw.text((0, 12), f"temp  {temp_c:.1f}C", font=font, fill=255)
-    else:
-        draw.text((0, 12), "temp  ?", font=font, fill=255)
-    draw.text((0, 24), f"load  {load_tuple[0]:.2f} {load_tuple[1]:.2f} {load_tuple[2]:.2f}", font=font, fill=255)
-    if mem_used_mb is not None:
-        draw.text((0, 36), f"mem   {mem_used_mb} MB used", font=font, fill=255)
-    else:
-        draw.text((0, 36), "mem   ?", font=font, fill=255)
-
-    # Icons near temp line
-    temp_y = 10  # aligns with y=12 text baseline
-    thermo_x = width - 26
-    badge_x = thermo_x + 12
-    if temp_c is not None:
-        draw_temp_icon(draw, thermo_x, temp_y - 2, temp_c=temp_c, height=18)
-        if temp_c < 50.0:
-            draw_snowflake(draw, badge_x, temp_y - 2, size=12)
-        else:
-            draw_flame(draw, badge_x, temp_y - 2, size=12)
-    else:
-        # Draw an empty thermometer if temp unavailable
-        draw_temp_icon(draw, thermo_x, temp_y - 2, temp_c=None, height=18)
-
-    device.display(image)
 
 # -----------------------------
 # Main loop
@@ -641,6 +622,7 @@ def main():
         traceback.print_exc()
         return
     tput = Throughput()
+    cpu_usage = CPUUsage()
     setup_button()
     pages = ["host", "wan", "lan", "ts", "tput", "sys"]
     page_idx = 0
@@ -724,8 +706,9 @@ def main():
                 elif page == "sys":
                     temp = get_cpu_temp_c()
                     load = get_loadavg()
-                    mem = get_mem_used_mb()
-                    draw_system_page(device, temp, load, mem)
+                    cpu_pct = cpu_usage.percent()
+                    mem_used, mem_total = get_mem_usage_mb()
+                    draw_system_page(device, temp, cpu_pct, load, mem_used, mem_total)
             except Exception as e:
                 debug(f"Page render error ({page}): {e}")
                 traceback.print_exc()
