@@ -126,6 +126,22 @@ def poll_button(pin=SCREENSAVER_BUTTON_PIN):
             _cycle_mode()
     _btn_last_state = state
 
+# Responsive sleep with button polling
+def sleep_poll(duration, slice_sec=0.05):
+    """
+    Sleep up to 'duration' seconds in small slices while polling the button
+    so mode changes are near-immediate. Exits early if mode leaves PAGES.
+    """
+    start = time.time()
+    while True:
+        poll_button()
+        if display_mode != MODE_PAGES:
+            break
+        now = time.time()
+        if now - start >= duration:
+            break
+        time.sleep(min(slice_sec, duration - (now - start)))
+
 # -----------------------------
 # Utility helpers (shell-safe)
 # -----------------------------
@@ -428,60 +444,89 @@ def draw_wifi_page(device, wan_ip, ssid, rssi, ok):
     device.display(image)
 
 # --- Fun: Bouncing Raspberry "logo" -------------------------------------------
-def frame_raspberry(image, x, y, scale=1.0):
+def raspberry_silhouette(size=(128, 64), y_offset=0):
     """
-    Draw a simple raspberry (3-circle berry + leaves) onto the provided 1-bit PIL Image.
+    Create a 1-bit PIL image containing a filled Raspberry Pi silhouette.
     """
-    draw = ImageDraw.Draw(image)
-    S = scale
-    bx, by = int(x), int(y)
-    circles = [
-        (bx + int(10*S), by + int(10*S), int(10*S)),
-        (bx + int(22*S), by + int(10*S), int(10*S)),
-        (bx + int(16*S), by + int(4*S),  int(10*S)),
+    img = Image.new("1", size, 0)
+    draw = ImageDraw.Draw(img)
+    W, H = size
+    cx, cy = W // 2, H // 2 + y_offset
+    r = 7
+    dx = 11
+    dy = 9
+    rows = [
+        (-3*dy, 4,  0),
+        (-2*dy, 5, -dx//2),
+        (-1*dy, 6,  0),
+        ( 0*dy, 6, -dx//2),
+        ( 1*dy, 5,  0),
+        ( 2*dy, 4, -dx//2),
     ]
-    for cx, cy, r in circles:
-        draw.ellipse((cx-r, cy-r, cx+r, cy+r), fill=1, outline=1)
-    draw.ellipse((bx + int(10*S), by + int(-2*S), bx + int(16*S), by + int(4*S)), fill=1, outline=1)
-    draw.ellipse((bx + int(16*S), by + int(-2*S), bx + int(22*S), by + int(4*S)), fill=1, outline=1)
+    for yoff, count, xshift in rows:
+        start_x = cx - (count-1)*dx//2 + xshift
+        y = cy + yoff
+        for i in range(count):
+            x = start_x + i*dx
+            draw.ellipse((x - r, y - r, x + r, y + r), fill=1, outline=1)
+    core_r_x, core_r_y = 28, 22
+    draw.ellipse((cx - core_r_x, cy - core_r_y, cx + core_r_x, cy + core_r_y), fill=1)
+    top_y = cy - 3*dy - r - 2
+    draw.ellipse((cx - 44, top_y - 24, cx - 4, top_y + 6), fill=1)
+    draw.ellipse((cx + 4,  top_y - 24, cx + 44, top_y + 6), fill=1)
+    draw.polygon([(cx-2, top_y-2), (cx+2, top_y-2), (cx, top_y+6)], fill=0)
+    draw.rectangle((0, cy + 2*dy + r + 5, W, H), fill=0)
+    return img
+
+def build_raspberry_sprite(target_max=40):
+    """
+    Build a trimmed & scaled raspberry sprite (1-bit) suitable for bouncing.
+    """
+    base = raspberry_silhouette()
+    bbox = base.getbbox()
+    if not bbox:
+        return base.resize((target_max, target_max))
+    cropped = base.crop(bbox)
+    w, h = cropped.size
+    scale = min(target_max / w, target_max / h)
+    new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+    sprite = cropped.resize(new_size, Image.NEAREST)
+    return sprite  # 1-bit image with white silhouette, black background
 
 def bouncing_raspberry(device, fps=25):
     """
-    Run while in MODE_SAVER. Exit immediately when mode changes.
-    Includes button polling fallback each frame so mode can change even if edge
-    detection failed.
+    Run while in MODE_SAVER using the detailed silhouette sprite.
     """
     global display_mode
+    sprite = build_raspberry_sprite()
+    sw, sh = sprite.size
     width, height = device.width, device.height
-    w, h = 32, 32
-    x, y = (width - w) // 2, (height - h) // 2
+    x, y = (width - sw) // 2, (height - sh) // 2
     vx, vy = 1, 1
     dt = 1.0 / max(1, fps)
     font = ImageFont.load_default()
     debug("Entering screensaver")
     while display_mode == MODE_SAVER:
-        # If using polling fallback, check the button every frame
         poll_button()
         if display_mode != MODE_SAVER:
             break
-
-        img = Image.new("1", (width, height))
-        frame_raspberry(img, x, y, scale=1.0)
-        ImageDraw.Draw(img).text((0, 0), "Raspberry Pi", font=font, fill=1)
-        device.display(img)
-
+        frame = Image.new("1", (width, height))
+        # Title text
+        ImageDraw.Draw(frame).text((0, 0), "Raspberry Pi", font=font, fill=1)
+        # Paste sprite (sprite already 1-bit). Use sprite as mask to preserve silhouette.
+        frame.paste(sprite, (x, y), sprite)
+        device.display(frame)
         x += vx
         y += vy
-        if x <= 0 or x + w >= width:
+        if x <= 0 or x + sw >= width:
             vx = -vx
-            x = max(0, min(x, width - w))
-        if y <= 10 or y + h >= height:
+            x = max(0, min(x, width - sw))
+        # Keep below caption line (≈10px) like before
+        if y <= 10 or y + sh >= height:
             vy = -vy
-            y = max(10, min(y, height - h))
-
+            y = max(10, min(y, height - sh))
         time.sleep(dt)
     debug("Leaving screensaver")
-    # Small pause to avoid immediate re-entry thrash if button held
     time.sleep(0.05)
 
 def blank_screen(device):
@@ -671,7 +716,8 @@ def main():
                     ]
                     draw_lines(device, lines)
                 elif page == "tput":
-                    time.sleep(1.0)
+                    # replace fixed 1s sleep with responsive sleep
+                    sleep_poll(1.0)
                     eth = tput.kbit_s("eth0")
                     wlan = tput.kbit_s("wlan0")
                     draw_throughput(device, eth, wlan)
@@ -687,7 +733,7 @@ def main():
                 time.sleep(0.5)
 
             if page != "tput":
-                time.sleep(1.0)
+                sleep_poll(1.0)
     except KeyboardInterrupt:
         debug("Interrupted by user")
     except Exception as e:
