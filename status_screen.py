@@ -62,24 +62,69 @@ MODE_SAVER = 1
 MODE_OFF   = 2
 display_mode = MODE_PAGES
 
-def _cycle_mode(channel):
+# Button fallback / polling state
+BUTTON_EVENT_OK = False
+BUTTON_POLLING = False
+_btn_last_state = 1
+_btn_last_toggle_ts = 0.0
+BTN_DEBOUNCE_MS = 250
+
+def _cycle_mode(channel=None):
     """
     Cycle display mode: PAGES -> SAVER -> OFF -> PAGES ...
     """
     global display_mode
     display_mode = (display_mode + 1) % 3  # 0..2
+    debug(f"Button: cycle -> mode {display_mode}")
 
 def setup_button(pin=SCREENSAVER_BUTTON_PIN):
+    global BUTTON_EVENT_OK, BUTTON_POLLING, _btn_last_state
     if GPIO is None:
         debug("GPIO unavailable; button disabled")
         return
     try:
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        # Remove any prior registrations just in case
+        try:
+            GPIO.remove_event_detect(pin)
+        except Exception:
+            pass
         GPIO.add_event_detect(pin, GPIO.FALLING, callback=_cycle_mode, bouncetime=300)
-        debug(f"Button setup on BCM {pin}")
+        BUTTON_EVENT_OK = True
+        BUTTON_POLLING = False
+        debug(f"Button edge-detect active on BCM {pin}")
     except Exception as e:
-        debug(f"Button setup failed (fallback disabled): {e}")
+        debug(f"Edge detect setup failed ({e}); falling back to polling")
+        BUTTON_EVENT_OK = False
+        try:
+            # Ensure pin still configured
+            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            _btn_last_state = GPIO.input(pin)
+            BUTTON_POLLING = True
+            debug("Polling mode enabled for button")
+        except Exception as e2:
+            BUTTON_POLLING = False
+            debug(f"Polling fallback failed: {e2}; button disabled")
+
+def poll_button(pin=SCREENSAVER_BUTTON_PIN):
+    """
+    Polling fallback for button (falling edge). Software debounce.
+    """
+    global _btn_last_state, _btn_last_toggle_ts
+    if not BUTTON_POLLING or GPIO is None:
+        return
+    try:
+        state = GPIO.input(pin)
+    except Exception as e:
+        debug(f"GPIO input error: {e}")
+        return
+    if _btn_last_state == 1 and state == 0:  # falling edge
+        now = time.time()
+        if (now - _btn_last_toggle_ts) * 1000.0 > BTN_DEBOUNCE_MS:
+            _btn_last_toggle_ts = now
+            _cycle_mode()
+    _btn_last_state = state
 
 # -----------------------------
 # Utility helpers (shell-safe)
@@ -549,6 +594,9 @@ def main():
 
     try:
         while True:
+            # Always poll in case event detect missed or we are in fallback
+            poll_button()
+
             mode = display_mode
 
             if mode == MODE_SAVER:
@@ -556,7 +604,6 @@ def main():
                 if off_cleared: debug("Leaving OFF mode")
                 bouncing_raspberry(device)  # returns when mode changes
                 continue
-
             if mode == MODE_OFF:
                 if DEBUG: debug("Mode = OFF")
                 if not off_cleared:
@@ -566,7 +613,7 @@ def main():
                 continue
             else:
                 if DEBUG and off_cleared: debug("Mode = PAGES (resuming)")
-                off_cleared = False  # ensure redraw once we leave OFF
+                off_cleared = False
 
             now = time.time()
             if now - last_switch >= page_sw_every:
