@@ -448,6 +448,8 @@ def frame_raspberry(image, x, y, scale=1.0):
 def bouncing_raspberry(device, fps=25):
     """
     Run while in MODE_SAVER. Exit immediately when mode changes.
+    Includes button polling fallback each frame so mode can change even if edge
+    detection failed.
     """
     global display_mode
     width, height = device.width, device.height
@@ -458,10 +460,16 @@ def bouncing_raspberry(device, fps=25):
     font = ImageFont.load_default()
     debug("Entering screensaver")
     while display_mode == MODE_SAVER:
+        # If using polling fallback, check the button every frame
+        poll_button()
+        if display_mode != MODE_SAVER:
+            break
+
         img = Image.new("1", (width, height))
         frame_raspberry(img, x, y, scale=1.0)
         ImageDraw.Draw(img).text((0, 0), "Raspberry Pi", font=font, fill=1)
         device.display(img)
+
         x += vx
         y += vy
         if x <= 0 or x + w >= width:
@@ -470,8 +478,11 @@ def bouncing_raspberry(device, fps=25):
         if y <= 10 or y + h >= height:
             vy = -vy
             y = max(10, min(y, height - h))
+
         time.sleep(dt)
     debug("Leaving screensaver")
+    # Small pause to avoid immediate re-entry thrash if button held
+    time.sleep(0.05)
 
 def blank_screen(device):
     """
