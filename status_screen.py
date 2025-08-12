@@ -12,8 +12,7 @@ Pages:
   6) CPU temp, CPU usage %, load, memory used/total (MB)
 
 Requirements:
-  sudo apt install python3-pil python3-smbus i2c-tools
-  (optional for button) sudo apt install python3-rpi.gpio
+  sudo apt install python3-pil python3-smbus i2c-tools python3-rpi.gpio
   pip3 install luma.oled
 
 Environment:
@@ -503,97 +502,68 @@ def draw_system_page(device, temp_c, cpu_pct, load_tuple, mem_used_mb, mem_total
     device.display(image)
 
 # -----------------------------
-# Screensaver bitmap config
-SCREENSAVER_BITMAP_PATH = os.environ.get("SCREENSAVER_BITMAP", "raspberry.bmp")
+# Screensaver bitmap config (simplified)
+SCREENSAVER_BITMAP_FILENAME = "Raspberry_Pi_Logo.bmp"
 _SAVER_SPRITE = None
 
-def _resolve_bitmap_path(p):
+def load_saver_sprite(max_side=48):
     """
-    Return an absolute path for the bitmap. If relative, try:
-      1) Current working directory
-      2) Script directory
-    """
-    if os.path.isabs(p):
-        return p
-    # Try as-is first
-    if os.path.exists(p):
-        return os.path.abspath(p)
-    # Try script dir
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        cand = os.path.join(script_dir, p)
-        if os.path.exists(cand):
-            return cand
-    except Exception:
-        pass
-    return p  # return original (load will fail and fallback will trigger)
-
-def load_saver_sprite(max_side=42):
-    """
-    Load and cache the screensaver bitmap from SCREENSAVER_BITMAP_PATH.
-    - Converts to 1-bit
-    - Trims surrounding black border
-    - Scales so the longer side <= max_side (nearest neighbor)
+    Load Raspberry_Pi_Logo.bmp from the script directory.
+    Convert to 1-bit and shrink if larger than max_side.
     """
     global _SAVER_SPRITE
     if _SAVER_SPRITE is not None:
         return _SAVER_SPRITE
     try:
-        p = _resolve_bitmap_path(SCREENSAVER_BITMAP_PATH)
-        img = Image.open(p)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(script_dir, SCREENSAVER_BITMAP_FILENAME)
+        img = Image.open(path)
         if img.mode != "1":
             img = img.convert("L").point(lambda v: 255 if v > 128 else 0, mode="1")
-        bbox = img.getbbox()
-        if bbox:
-            img = img.crop(bbox)
         w, h = img.size
-        scale = min(1.0, max_side / max(w, h))
-        if scale < 1.0:
+        if max(w, h) > max_side:
+            scale = max_side / max(w, h)
             new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
             img = img.resize(new_size, Image.NEAREST)
         _SAVER_SPRITE = img
-        debug(f"Screensaver sprite loaded: {p} size={_SAVER_SPRITE.size}")
+        debug(f"Screensaver sprite loaded: {SCREENSAVER_BITMAP_FILENAME} size={img.size}")
         return _SAVER_SPRITE
     except Exception as e:
-        debug(f"Failed to load screensaver bitmap '{SCREENSAVER_BITMAP_PATH}': {e}")
-        placeholder = Image.new("1", (32, 32), 0)
-        d = ImageDraw.Draw(placeholder)
-        d.rectangle((0, 0, 31, 31), outline=1, fill=0)
-        d.text((4, 10), "NO", font=ImageFont.load_default(), fill=1)
-        d.text((4, 20), "IMG", font=ImageFont.load_default(), fill=1)
-        _SAVER_SPRITE = placeholder
+        debug(f"Screensaver bitmap load failed: {e}")
+        # Fallback tiny placeholder
+        ph = Image.new("1", (24, 24), 0)
+        d = ImageDraw.Draw(ph)
+        d.rectangle((0, 0, 23, 23), outline=1, fill=0)
+        d.text((4, 8), "NO", font=ImageFont.load_default(), fill=1)
+        d.text((4, 16), "IMG", font=ImageFont.load_default(), fill=1)
+        _SAVER_SPRITE = ph
         return _SAVER_SPRITE
 
 def bouncing_raspberry(device, fps=25):
     """
-    Run while in MODE_SAVER using the external bitmap sprite.
+    Bounce the bitmap sprite (no extra title text).
     """
     global display_mode
     sprite = load_saver_sprite()
     sw, sh = sprite.size
     width, height = device.width, device.height
     if width == 0 or height == 0:
-        debug("Device dimensions invalid; aborting screensaver")
         return
-    # Safety: shrink sprite if larger than display (unexpected)
+    # Safety shrink (unexpected)
     if sw > width or sh > height:
         scale = min(width / sw, height / sh, 1.0)
-        if scale < 1.0:
-            new_size = (max(1, int(sw * scale)), max(1, int(sh * scale)))
-            sprite = sprite.resize(new_size, Image.NEAREST)
-            sw, sh = sprite.size
+        new_size = (max(1, int(sw * scale)), max(1, int(sh * scale)))
+        sprite = sprite.resize(new_size, Image.NEAREST)
+        sw, sh = sprite.size
     x, y = (width - sw) // 2, (height - sh) // 2
     vx, vy = 1, 1
     dt = 1.0 / max(1, fps)
-    font = ImageFont.load_default()
     debug("Entering screensaver")
     while display_mode == MODE_SAVER:
         poll_button()
         if display_mode != MODE_SAVER:
             break
         frame = Image.new("1", (width, height))
-        # Title (remove if pure image desired)
-        ImageDraw.Draw(frame).text((0, 0), "Raspberry Pi", font=font, fill=1)
         frame.paste(sprite, (x, y), sprite)
         device.display(frame)
         x += vx
@@ -601,9 +571,9 @@ def bouncing_raspberry(device, fps=25):
         if x <= 0 or x + sw >= width:
             vx = -vx
             x = max(0, min(x, width - sw))
-        if y <= 10 or y + sh >= height:
+        if y <= 0 or y + sh >= height:
             vy = -vy
-            y = max(10, min(y, height - sh))
+            y = max(0, min(y, height - sh))
         time.sleep(dt)
     debug("Leaving screensaver")
     time.sleep(0.05)
