@@ -21,14 +21,39 @@ import time
 import socket
 import subprocess
 from datetime import datetime, timedelta
+import traceback
 
 from PIL import Image, ImageDraw, ImageFont
 
 from luma.core.interface.serial import i2c
 from luma.oled.device import sh1106
 
+# --- Debug / logging helpers --------------------------------------------------
+DEBUG = os.environ.get("SCREEN_DEBUG", "0") not in ("0", "", "false", "False")
+LOG_PATH = os.environ.get("SCREEN_LOG", "")  # optional file path
+
+def debug(msg):
+    if not DEBUG:
+        return
+    line = f"[SCREEN] {time.strftime('%H:%M:%S')} {msg}"
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
+    if LOG_PATH:
+        try:
+            with open(LOG_PATH, "a") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
 # --- Button toggle (GPIO) -----------------------------------------------------
-import RPi.GPIO as GPIO
+try:
+    import RPi.GPIO as GPIO
+except Exception as e:
+    GPIO = None
+    debug(f"GPIO import failed: {e}")
+
 SCREENSAVER_BUTTON_PIN = 17  # BCM pin number; wire to a momentary button to GND
 
 # Display modes
@@ -45,9 +70,16 @@ def _cycle_mode(channel):
     display_mode = (display_mode + 1) % 3  # 0..2
 
 def setup_button(pin=SCREENSAVER_BUTTON_PIN):
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # button to GND
-    GPIO.add_event_detect(pin, GPIO.FALLING, callback=_cycle_mode, bouncetime=300)
+    if GPIO is None:
+        debug("GPIO unavailable; button disabled")
+        return
+    try:
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.add_event_detect(pin, GPIO.FALLING, callback=_cycle_mode, bouncetime=300)
+        debug(f"Button setup on BCM {pin}")
+    except Exception as e:
+        debug(f"Button setup failed (fallback disabled): {e}")
 
 # -----------------------------
 # Utility helpers (shell-safe)
@@ -379,6 +411,7 @@ def bouncing_raspberry(device, fps=25):
     vx, vy = 1, 1
     dt = 1.0 / max(1, fps)
     font = ImageFont.load_default()
+    debug("Entering screensaver")
     while display_mode == MODE_SAVER:
         img = Image.new("1", (width, height))
         frame_raspberry(img, x, y, scale=1.0)
@@ -393,6 +426,7 @@ def bouncing_raspberry(device, fps=25):
             vy = -vy
             y = max(10, min(y, height - h))
         time.sleep(dt)
+    debug("Leaving screensaver")
 
 def blank_screen(device):
     """
@@ -400,6 +434,7 @@ def blank_screen(device):
     """
     image = Image.new("1", (device.width, device.height))
     device.display(image)
+    debug("Display blanked (OFF mode)")
 
 # --- Temp icons and system page ----------------------------------------------
 def draw_temp_icon(draw, x, y, temp_c=None, height=18):
@@ -496,7 +531,14 @@ def draw_system_page(device, temp_c, load_tuple, mem_used_mb):
 # -----------------------------
 
 def main():
-    device = make_device()
+    debug("Starting status_screen")
+    try:
+        device = make_device()
+        debug("OLED device initialized")
+    except Exception as e:
+        debug(f"OLED init failed: {e}")
+        traceback.print_exc()
+        return
     tput = Throughput()
     setup_button()
     pages = ["host", "wan", "lan", "ts", "tput", "sys"]
@@ -510,17 +552,20 @@ def main():
             mode = display_mode
 
             if mode == MODE_SAVER:
-                off_cleared = False  # leaving OFF
+                if DEBUG: debug("Mode = SAVER")
+                if off_cleared: debug("Leaving OFF mode")
                 bouncing_raspberry(device)  # returns when mode changes
                 continue
 
             if mode == MODE_OFF:
+                if DEBUG: debug("Mode = OFF")
                 if not off_cleared:
                     blank_screen(device)
                     off_cleared = True
                 time.sleep(0.25)
                 continue
             else:
+                if DEBUG and off_cleared: debug("Mode = PAGES (resuming)")
                 off_cleared = False  # ensure redraw once we leave OFF
 
             now = time.time()
@@ -529,6 +574,9 @@ def main():
                 last_switch = now
 
             page = pages[page_idx]
+
+            if DEBUG:
+                debug(f"Page={page}")
 
             try:
                 if page == "host":
@@ -540,13 +588,11 @@ def main():
                         f"LAN   {get_iface_ip('eth0')}",
                     ]
                     draw_lines(device, lines)
-
                 elif page == "wan":
                     wan_ip = get_default_route_ip()
                     ssid, rssi = get_wifi_info("wlan0")
                     ok = internet_ok()
                     draw_wifi_page(device, wan_ip, ssid, rssi, ok)
-
                 elif page == "lan":
                     leases = count_dnsmasq_leases()
                     lines = [
@@ -557,7 +603,6 @@ def main():
                         "",
                     ]
                     draw_lines(device, lines)
-
                 elif page == "ts":
                     lines = [
                         "TAILSCALE",
@@ -567,24 +612,40 @@ def main():
                         "",
                     ]
                     draw_lines(device, lines)
-
                 elif page == "tput":
                     time.sleep(1.0)
                     eth = tput.kbit_s("eth0")
                     wlan = tput.kbit_s("wlan0")
                     draw_throughput(device, eth, wlan)
-
                 elif page == "sys":
                     temp = get_cpu_temp_c()
                     load = get_loadavg()
                     mem = get_mem_used_mb()
                     draw_system_page(device, temp, load, mem)
-
-            except Exception:
+            except Exception as e:
+                debug(f"Page render error ({page}): {e}")
+                traceback.print_exc()
                 draw_lines(device, ["OLED error", "retrying..."])
                 time.sleep(0.5)
 
             if page != "tput":
                 time.sleep(1.0)
+    except KeyboardInterrupt:
+        debug("Interrupted by user")
+    except Exception as e:
+        debug(f"Fatal loop error: {e}")
+        traceback.print_exc()
     finally:
-        GPIO.cleanup()
+        if GPIO:
+            try:
+                GPIO.cleanup()
+                debug("GPIO cleaned up")
+            except Exception as e:
+                debug(f"GPIO cleanup error: {e}")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        debug(f"Top-level exception: {e}")
+        traceback.print_exc()
