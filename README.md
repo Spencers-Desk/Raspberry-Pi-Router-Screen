@@ -23,7 +23,7 @@ OLED SH1106 I2C:
 - Pin 1 - VCC->3V3
 - Pin 3 - SDA->GPIO2 (SDA)
 - Pin 5 - SCL->GPIO3 (SCL)
-- Pin 7 - GND->GND
+- Pin 9 - GND->GND
 Button (screensaver toggle):
 - Pin 11 - GPIO17
 - Pin 14 - GND
