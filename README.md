@@ -2,6 +2,9 @@
 
 This is a simple script that writes system info to a small 128x64 SH1106 OLED dashboard for a Raspberry Pi router. It has a system info, screen saver, and poweroff mode.
 
+Checkout the full project!
+[Raspberry Pi Router](https://spencersdesk.com/projects/pi-router)
+
 ## What it shows
 1) Hostname, time, uptime  
 2) WAN IPv4, Internet reachability, Wi‑Fi SSID & RSSI (wlan0)  
@@ -48,6 +51,7 @@ i2cdetect -y 1   # expect 0x3c
 
 4) Get the code:
 ```bash
+cd
 git clone https://github.com/your/repo.git
 cd Raspberry-Pi-Router-Screen
 ```

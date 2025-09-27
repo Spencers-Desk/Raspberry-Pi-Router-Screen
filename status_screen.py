@@ -13,7 +13,7 @@ Pages:
 
 Button (BCM17 -> GND) cycles modes: Pages -> Screensaver -> Off.
 
-Place Raspberry_Pi_Logo.bmp (1‑bit or any format convertible) in the same directory for the screensaver.
+Place Raspberry_Pi_Logo.bmp (1-bit or any format convertible) in the same directory for the screensaver.
 """
 
 import os
